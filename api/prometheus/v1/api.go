@@ -237,7 +237,7 @@ type API interface {
 	// Query performs a query for the given time.
 	Query(ctx context.Context, query string, ts time.Time) (model.Value, Warnings, error)
 	// QueryRange performs a query for the given range.
-	QueryRange(ctx context.Context, query string, r Range) (model.Value, Warnings, error)
+	QueryRange(ctx context.Context, query string, r Range, headers http.Header) (model.Value, Warnings, error)
 	// Runtimeinfo returns the various runtime information properties about the Prometheus server.
 	Runtimeinfo(ctx context.Context) (RuntimeinfoResult, error)
 	// Series finds series by label matchers.
@@ -740,7 +740,7 @@ func (h *httpAPI) Query(ctx context.Context, query string, ts time.Time) (model.
 		q.Set("time", formatTime(ts))
 	}
 
-	_, body, warnings, err := h.client.DoGetFallback(ctx, u, q)
+	_, body, warnings, err := h.client.DoGetFallback(ctx, u, q, http.Header{})
 	if err != nil {
 		return nil, warnings, err
 	}
@@ -749,7 +749,7 @@ func (h *httpAPI) Query(ctx context.Context, query string, ts time.Time) (model.
 	return model.Value(qres.v), warnings, json.Unmarshal(body, &qres)
 }
 
-func (h *httpAPI) QueryRange(ctx context.Context, query string, r Range) (model.Value, Warnings, error) {
+func (h *httpAPI) QueryRange(ctx context.Context, query string, r Range, headers http.Header) (model.Value, Warnings, error) {
 	u := h.client.URL(epQueryRange, nil)
 	q := u.Query()
 
@@ -758,7 +758,8 @@ func (h *httpAPI) QueryRange(ctx context.Context, query string, r Range) (model.
 	q.Set("end", formatTime(r.End))
 	q.Set("step", strconv.FormatFloat(r.Step.Seconds(), 'f', -1, 64))
 
-	_, body, warnings, err := h.client.DoGetFallback(ctx, u, q)
+	res, body, warnings, err := h.client.DoGetFallback(ctx, u, q, headers)
+	fmt.Printf("res: %#v\n", res)
 	if err != nil {
 		return nil, warnings, err
 	}
@@ -924,7 +925,7 @@ type Warnings []string
 type apiClient interface {
 	URL(ep string, args map[string]string) *url.URL
 	Do(context.Context, *http.Request) (*http.Response, []byte, Warnings, error)
-	DoGetFallback(ctx context.Context, u *url.URL, args url.Values) (*http.Response, []byte, Warnings, error)
+	DoGetFallback(ctx context.Context, u *url.URL, args url.Values, headers http.Header) (*http.Response, []byte, Warnings, error)
 }
 
 type apiClientImpl struct {
@@ -1006,17 +1007,24 @@ func (h *apiClientImpl) Do(ctx context.Context, req *http.Request) (*http.Respon
 
 // DoGetFallback will attempt to do the request as-is, and on a 405 or 501 it
 // will fallback to a GET request.
-func (h *apiClientImpl) DoGetFallback(ctx context.Context, u *url.URL, args url.Values) (*http.Response, []byte, Warnings, error) {
-	req, err := http.NewRequest(http.MethodPost, u.String(), strings.NewReader(args.Encode()))
+func (h *apiClientImpl) DoGetFallback(ctx context.Context, u *url.URL, args url.Values, headers http.Header) (*http.Response, []byte, Warnings, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(args.Encode()))
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
+	for k, v := range headers {
+		req.Header.Set(k, v[0])
+	}
+
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	fmt.Printf("req header: %#v\n", req.Header)
 
 	resp, body, warnings, err := h.Do(ctx, req)
 	if resp != nil && (resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented) {
 		u.RawQuery = args.Encode()
-		req, err = http.NewRequest(http.MethodGet, u.String(), nil)
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
 			return nil, nil, warnings, err
 		}
